@@ -113,9 +113,15 @@ fn launch(dir: &PathBuf, cfg: &str) -> Run {
     Run { child }
 }
 
+/// How far the test scene is shifted from the screen center, in pixels (0 unless E2E_OFFSET says otherwise).
+fn e2e_offset() -> i32 {
+    std::env::var("E2E_OFFSET").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
 /// Later keys win, so `extra` can override the pinned monitor and scale.
 fn base_cfg(layers: &str, extra: &str) -> String {
-    format!("trigger=key\nkey=F8\nhip.outline=0\nhip.opacity=10\nhip.layers={layers}\nads.layers=oc1 dot.ffffff.1.0.1.1.0\ndisplay.monitor=primary\ndisplay.scale=1\nautoupdate={}\n{extra}\n", std::env::var("E2E_AUTOUPDATE").unwrap_or_else(|_| "0".to_string()))
+    let o = e2e_offset();
+    format!("trigger=key\nkey=F8\nhip.outline=0\nhip.opacity=10\nhip.layers={layers}\nads.layers=oc1 dot.ffffff.1.0.1.1.0\ndisplay.monitor=primary\ndisplay.scale=1\nautoupdate={}\noffset={o},{o}\n{extra}\n", std::env::var("E2E_AUTOUPDATE").unwrap_or_else(|_| "0".to_string()))
 }
 
 /// Make `hwnd` the foreground window. Windows only lets the foreground process do that, so
@@ -253,7 +259,7 @@ fn main() {
     let dir = std::env::temp_dir().join("redraw-e2e");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(&exe, dir.join("redraw.exe")).unwrap();
-    // Optional second argument: run only the cases whose name contains it (glow, lens, capture, auto, idle, zoom, trace, scale, shapes, cycle, morph, states, update, forcequit, restart, follow).
+    // Optional second argument: run only the cases whose name contains it (glow, lens, capture, auto, idle, zoom, aspect, trace, scale, shapes, cycle, morph, states, update, forcequit, restart, follow).
     let only = std::env::args().nth(2).unwrap_or_default();
     let go = |name: &str| only.is_empty() || name.contains(only.as_str());
     let mut failures = 0;
@@ -268,7 +274,7 @@ fn main() {
         let class_name = wide("E2eSolid");
         let wc = WNDCLASSEXW { cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32, style: 0, lpfnWndProc: Some(solid_proc), cbClsExtra: 0, cbWndExtra: 0, hInstance: GetModuleHandleW(null()), hIcon: null_mut(), hCursor: null_mut(), hbrBackground: null_mut(), lpszMenuName: null(), lpszClassName: class_name.as_ptr(), hIconSm: null_mut() };
         assert!(RegisterClassExW(&wc) != 0);
-        let (cx, cy) = (GetSystemMetrics(SM_CXSCREEN) / 2, GetSystemMetrics(SM_CYSCREEN) / 2);
+        let (cx, cy) = (GetSystemMetrics(SM_CXSCREEN) / 2 + e2e_offset(), GetSystemMetrics(SM_CYSCREEN) / 2 + e2e_offset());
         let back = (200u8, 100u8, 50u8);
         let backdrop = solid(cx - 200, cy - 200, 400, 400, rgb(back.0, back.1, back.2));
         pump(200);
@@ -431,6 +437,38 @@ trace.color=#ff00ff"));
             check("trace (Fire, Return: Hold): the line stays after release", held_after >= 20, format!("{held_after} magenta px"));
         }
 
+        // Aspect ratio: a 16:9 area that reshapes what it shows. A tall and a wide white stripe cross at the
+        // screen center; the area (200 long, 2.0x) is read back to see its shape and how the stripes were scaled.
+        if go("aspect") {
+            recolor(backdrop, rgb(0, 0, 0));
+            let white = |p: &(u8, u8, u8)| p.0 > 200 && p.1 > 200 && p.2 > 200;
+            let vertical = solid(cx - 2, cy - 150, 4, 300, rgb(255, 255, 255));
+            let horizontal = solid(cx - 150, cy - 2, 300, 4, rgb(255, 255, 255));
+            pump(200);
+            let measure = |extra: &str| -> (usize, usize, usize) {
+                let _r = launch(&dir, &base_cfg("oc1 -dot.ffffff.1.0.1.1.0", &format!("aspect.enabled=1\naspect.ratio=16:9\naspect.zoom=20\naspect.size=200\naspect.shape=rect\n{extra}")));
+                pump(1800);
+                let stripe_width = capture(cx - 30, cy - 40, 60, 1).iter().filter(|p| white(p)).count();
+                // x = +30 is inside the area whatever its shape (200 wide, or 113 wide when tall)
+                let stripe_thickness = capture(cx + 30, cy - 50, 1, 100).iter().filter(|p| white(p)).count();
+                let area_height = capture(cx + 3, cy - 150, 1, 300).iter().filter(|p| white(p)).count();
+                (stripe_width, stripe_thickness, area_height)
+            };
+            let (w, t, h) = measure("aspect.when=always\naspect.fit=stretch");
+            check("aspect (16:9, Stretch): the area is 16:9 (200 x 113)", (111..=115).contains(&h), format!("{h} px tall (want 113)"));
+            check("aspect (Stretch): across is scaled 2.0x", (7..=9).contains(&w), format!("a 4 px stripe became {w} px (want 8)"));
+            check("aspect (Stretch): down is scaled less (1.13x), the squeezed look", (4..=5).contains(&t), format!("a 4 px stripe became {t} px (want 4 or 5)"));
+            let (w, t, h) = measure("aspect.when=always\naspect.fit=crop");
+            check("aspect (Crop): same 16:9 area", (111..=115).contains(&h), format!("{h} px tall"));
+            check("aspect (Crop): scaled evenly, 2.0x across and about 2.0x down", (7..=9).contains(&w) && (7..=9).contains(&t), format!("a 4 px stripe became {w} across and {t} down (want 8 and 8)"));
+            let (w, t, h) = measure("aspect.when=ads\naspect.fit=stretch");
+            check("aspect (Active: ADS): no area while not aiming down sights; the original stripes are untouched", w == 4 && t == 4 && h == 4, format!("stripe {w} px wide, {t} thick, column {h} (want 4, 4, 4)"));
+            let (w, t, _) = measure("aspect.when=always\naspect.fit=stretch\naspect.ratio=9:16");
+            check("aspect (9:16, Stretch): a tall area scales down 2.0x but across only 1.13x", (4..=5).contains(&w) && (7..=9).contains(&t), format!("a 4 px stripe became {w} across and {t} down (want 4 or 5, and 8)"));
+            DestroyWindow(vertical);
+            DestroyWindow(horizontal);
+        }
+
         // whole-number scale: every crosshair pixel becomes a 2x2 block
         if go("scale") {
             recolor(backdrop, rgb(back.0, back.1, back.2));
@@ -461,18 +499,18 @@ trace.color=#ff00ff"));
             } else {
                 let s = ((rc.right - rc.left) / 212).max(1);
                 let at = |lx: i32, ly: i32| (rc.left + lx * s, rc.top + ly * s);
-                // Two header rows: Profile at logical y 45..59, Layers at 119..133 (below the update status line and the Profile rows, incl. Morph). x=200 is right of the text.
-                let (row1, row2) = (at(200, 52), at(200, 126));
+                // Two header rows: Profile at logical y 67..81, Layers at 141..155 (below the status line, the controls and the Profile rows, incl. Morph). x=200 is right of the text.
+                let (row1, row2) = (at(200, 74), at(200, 148));
                 SetCursorPos(cx, cy + 300); // somewhere that is not the menu
                 pump(300);
                 let base1 = capture(row1.0, row1.1, 1, 1)[0];
                 let base2 = capture(row2.0, row2.1, 1, 1)[0];
                 let brighter = |p: (u8, u8, u8), base: (u8, u8, u8)| p.0 as i32 - base.0 as i32 >= 4 && p.1 as i32 - base.1 as i32 >= 4 && p.2 as i32 - base.2 as i32 >= 4;
-                let over1 = at(100, 52);
+                let over1 = at(100, 74);
                 SetCursorPos(over1.0, over1.1);
                 pump(300);
                 let lit1 = capture(row1.0, row1.1, 1, 1)[0];
-                let over2 = at(100, 126);
+                let over2 = at(100, 148);
                 SetCursorPos(over2.0, over2.1);
                 pump(300);
                 let back1 = capture(row1.0, row1.1, 1, 1)[0];
@@ -487,7 +525,7 @@ trace.color=#ff00ff"));
         }
 
         // The DEFAULT config must keep the crosshair at the screen center even with a big window focused.
-        if go("default-center") {
+        if go("default-center") && e2e_offset() == 0 {
             let fg = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, wide("E2eSolid").as_ptr(), null(), WS_POPUP | WS_VISIBLE, 150, 80, 1200, 700, null_mut(), null_mut(), GetModuleHandleW(null()), null());
             recolor(fg, rgb(30, 60, 90));
             if !take_foreground(fg) {
@@ -506,7 +544,7 @@ trace.color=#ff00ff"));
         }
 
         // Follow window (opt-in): tracks the focused window's viewport
-        if go("follow") {
+        if go("follow") && e2e_offset() == 0 {
             let fg = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, wide("E2eSolid").as_ptr(), null(), WS_POPUP | WS_VISIBLE, 150, 80, 1200, 700, null_mut(), null_mut(), GetModuleHandleW(null()), null());
             recolor(fg, rgb(30, 60, 90));
             if !take_foreground(fg) {
@@ -708,7 +746,7 @@ trace.color=#ff00ff"));
         // Restart now: the new copy waits for the one that started it to be gone before it starts.
         if go("restart") {
             recolor(backdrop, rgb(back.0, back.1, back.2));
-            std::fs::write(dir.join("redraw.cfg"), "trigger=key\nkey=F8\nhip.outline=0\nhip.opacity=10\nhip.layers=oc1 dot.ff0000.9.0.1.1.0\ndisplay.monitor=primary\ndisplay.scale=1\nautoupdate=0\n").unwrap();
+            std::fs::write(dir.join("redraw.cfg"), format!("trigger=key\nkey=F8\nhip.outline=0\nhip.opacity=10\nhip.layers=oc1 dot.ff0000.9.0.1.1.0\ndisplay.monitor=primary\ndisplay.scale=1\nautoupdate=0\noffset={0},{0}\n", e2e_offset())).unwrap();
             // a stand-in "old copy": a process that lives for about 3 seconds
             let mut old = Command::new("ping").args(["-n", "4", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().expect("ping");
             let child = Command::new(dir.join("redraw.exe")).current_dir(&dir).arg("--restart-from").arg(old.id().to_string()).spawn().expect("start redraw.exe");

@@ -41,6 +41,43 @@ pub enum AutoMode {
     Palette,
 }
 
+/// How the Aspect ratio area fits what it reads into its shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fit {
+    /// read the same square as the zoom and squeeze it into the shape (a "stretched resolution" look)
+    Stretch,
+    /// read a patch of the same shape: wider or taller, nothing distorted
+    Crop,
+}
+
+/// Shapes the Aspect ratio area can take, (width, height), in the order the menu cycles them.
+pub const RATIOS: [(i32, i32); 10] = [(1, 1), (5, 4), (4, 3), (3, 2), (16, 10), (16, 9), (21, 9), (2, 1), (3, 4), (9, 16)];
+
+pub fn ratio_name(r: (i32, i32)) -> String {
+    format!("{}:{}", r.0, r.1)
+}
+
+/// `16:9` and the other shapes in `RATIOS`; anything else is not a ratio we offer.
+fn parse_ratio(v: &str) -> Option<(i32, i32)> {
+    RATIOS.iter().copied().find(|r| ratio_name(*r) == v.trim())
+}
+
+/// A magnified area at the screen center whose shape is its own: it zooms like Scope zoom and also
+/// takes any of the ratios above. It reads only the screen behind it, through Windows' own magnifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Aspect {
+    pub enabled: bool,
+    pub ratio: (i32, i32),
+    pub fit: Fit,
+    /// tenths: 10 is 1.0x (a pure shape change), up to 40
+    pub factor: i32,
+    /// the long side of the area, in pixels
+    pub size: i32,
+    /// an ellipse instead of a rectangle
+    pub ellipse: bool,
+    pub when: ZoomWhen,
+}
+
 /// Crosshair that reacts to your own input (never to the game).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dynamics {
@@ -104,6 +141,7 @@ pub struct Experimental {
     pub dynamics: Dynamics,
     pub trace: Trace,
     pub zoom: Zoom,
+    pub aspect: Aspect,
     pub auto: Auto,
 }
 
@@ -128,6 +166,7 @@ impl Default for Experimental {
                 smooth: 1,
             },
             zoom: Zoom { enabled: false, factor: 20, size: 220, circle: true, when: ZoomWhen::Ads },
+            aspect: Aspect { enabled: false, ratio: (16, 9), fit: Fit::Stretch, factor: 20, size: 260, ellipse: false, when: ZoomWhen::Ads },
             auto: Auto { enabled: false, mode: AutoMode::LightDark, rate: 2 },
         }
     }
@@ -165,7 +204,7 @@ fn motion_tag(m: Motion) -> &'static str {
 impl Experimental {
     /// Apply one `key=value` line. Returns false if the key is not one of ours.
     pub fn set(&mut self, key: &str, value: &str) -> bool {
-        let (d, t, z, a) = (&mut self.dynamics, &mut self.trace, &mut self.zoom, &mut self.auto);
+        let (d, t, z, p, a) = (&mut self.dynamics, &mut self.trace, &mut self.zoom, &mut self.aspect, &mut self.auto);
         match key {
             "capture" => {
                 if let Some(v) = flag(value) {
@@ -230,6 +269,25 @@ impl Experimental {
                 "always" => z.when = ZoomWhen::Always,
                 _ => {}
             },
+            "aspect.enabled" => p.enabled = flag(value).unwrap_or(p.enabled),
+            "aspect.ratio" => p.ratio = parse_ratio(value).unwrap_or(p.ratio),
+            "aspect.fit" => match value {
+                "stretch" => p.fit = Fit::Stretch,
+                "crop" => p.fit = Fit::Crop,
+                _ => {}
+            },
+            "aspect.zoom" => p.factor = int(value).map(|n| (n.clamp(10, 40) as i32 + 2) / 5 * 5).unwrap_or(p.factor),
+            "aspect.size" => p.size = int(value).map(|n| (n.clamp(100, 400) as i32 + 10) / 20 * 20).unwrap_or(p.size),
+            "aspect.shape" => match value {
+                "ellipse" => p.ellipse = true,
+                "rect" => p.ellipse = false,
+                _ => {}
+            },
+            "aspect.when" => match value {
+                "ads" => p.when = ZoomWhen::Ads,
+                "always" => p.when = ZoomWhen::Always,
+                _ => {}
+            },
             "auto.enabled" => a.enabled = flag(value).unwrap_or(a.enabled),
             "auto.mode" => match value {
                 "lightdark" => a.mode = AutoMode::LightDark,
@@ -243,7 +301,7 @@ impl Experimental {
     }
 
     pub fn serialize_into(&self, s: &mut String) {
-        let (d, t, z, a) = (&self.dynamics, &self.trace, &self.zoom, &self.auto);
+        let (d, t, z, p, a) = (&self.dynamics, &self.trace, &self.zoom, &self.aspect, &self.auto);
         let b = |v: bool| u8::from(v);
         s.push_str(&format!("capture={}\n", b(self.show_on_capture)));
         s.push_str(&format!(
@@ -284,6 +342,16 @@ impl Experimental {
             z.size,
             if z.circle { "circle" } else { "square" },
             if z.when == ZoomWhen::Ads { "ads" } else { "always" }
+        ));
+        s.push_str(&format!(
+            "aspect.enabled={}\naspect.ratio={}\naspect.fit={}\naspect.zoom={}\naspect.size={}\naspect.shape={}\naspect.when={}\n",
+            b(p.enabled),
+            ratio_name(p.ratio),
+            if p.fit == Fit::Stretch { "stretch" } else { "crop" },
+            p.factor,
+            p.size,
+            if p.ellipse { "ellipse" } else { "rect" },
+            if p.when == ZoomWhen::Ads { "ads" } else { "always" }
         ));
         s.push_str(&format!(
             "auto.enabled={}\nauto.mode={}\nauto.rate={}\n",
@@ -335,6 +403,7 @@ mod tests {
             smooth: 3,
         };
         e.zoom = Zoom { enabled: true, factor: 35, size: 340, circle: false, when: ZoomWhen::Always };
+        e.aspect = Aspect { enabled: true, ratio: (21, 9), fit: Fit::Crop, factor: 35, size: 340, ellipse: true, when: ZoomWhen::Always };
         e.auto = Auto { enabled: true, mode: AutoMode::Palette, rate: 3 };
         let mut s = String::new();
         e.serialize_into(&mut s);
@@ -360,6 +429,26 @@ mod tests {
         assert_eq!(apply("zoom.factor=23").zoom.factor, 25);
         assert_eq!(apply("zoom.size=250").zoom.size, 260);
         assert_eq!(apply("trace.range=200").trace.range, 256);
+    }
+
+    #[test]
+    fn aspect_ratio_values_snap_clamp_and_reject_what_is_not_offered() {
+        assert_eq!(apply("aspect.zoom=22").aspect.factor, 20);
+        assert_eq!(apply("aspect.zoom=3").aspect.factor, 10, "1.0x is the floor: a pure shape change");
+        assert_eq!(apply("aspect.zoom=999").aspect.factor, 40);
+        assert_eq!(apply("aspect.size=250").aspect.size, 260);
+        assert_eq!(apply("aspect.size=1").aspect.size, 100);
+        for r in RATIOS {
+            assert_eq!(apply(&format!("aspect.ratio={}", ratio_name(r))).aspect.ratio, r, "{r:?}");
+        }
+        let d = Experimental::default().aspect;
+        for bad in ["17:9", "16:9:1", "169", "0:0", "", "wide", "-4:3"] {
+            assert_eq!(apply(&format!("aspect.ratio={bad}")).aspect.ratio, d.ratio, "{bad:?} keeps the default");
+        }
+        assert_eq!(apply("aspect.fit=crop").aspect.fit, Fit::Crop);
+        assert_eq!(apply("aspect.fit=zoomy").aspect.fit, d.fit);
+        assert!(apply("aspect.shape=ellipse").aspect.ellipse && !apply("aspect.shape=rect").aspect.ellipse);
+        assert!(!d.enabled, "off until asked for");
     }
 
     #[test]

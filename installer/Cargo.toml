@@ -3,6 +3,7 @@ name = "redraw-setup"
 version = "0.2.0"
 edition = "2021"
 authors = ["Christopher Robin Fiore"]
+license = "MIT"
 description = "Installer for reDraw: one file, current user only, no administrator."
 
 [dependencies]

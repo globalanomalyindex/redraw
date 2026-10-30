@@ -34,7 +34,8 @@ use crate::dynamics::{self, Dyn, Frame, Inputs, NEUTRAL};
 use crate::experimental::ZoomWhen;
 use crate::frame::{FramePacer, WM_FRAME};
 use crate::hud::{self, Hud};
-use crate::lens::{self, Lenses, ZoomSpec};
+use crate::area;
+use crate::lens::{self, AreaSpec, Lenses};
 use crate::menu::{Effects, Key};
 use crate::monitors::{self, Target};
 use crate::morph::{self, Morph};
@@ -54,6 +55,9 @@ const TIMER_AUTO: usize = 3;
 const TIMER_IDLE: usize = 4;
 const TIMER_FOLLOW: usize = 5;
 const TIMER_UPDATE: usize = 6;
+const TIMER_RESTART: usize = 7;
+/// Restart waits this long for an update check to answer before restarting anyway.
+const RESTART_WAIT_MS: u32 = 12_000;
 const FOLLOW_MS: u32 = 250;
 /// the crosshair window is at most 4x the 33x33 grid
 const CROSS_MAX: i32 = N as i32 * display::MAX_SCALE;
@@ -119,6 +123,8 @@ struct Live {
     morph: Morph,
     /// the scripted spray of the menu's Test trace link, while it plays
     demo: Option<Demo>,
+    /// the Restart button is waiting for an update check to finish
+    restart_pending: bool,
     /// hue offsets the crosshair was last drawn with (hue-cycling layers)
     hues: [i32; 4],
     /// the hue clock starts here
@@ -169,7 +175,7 @@ fn force_quit() -> ! {
     unsafe { ExitProcess(0) }
 }
 
-/// After "Restart now": the new copy waits for the one that started it to be gone before it takes
+/// After "Restart": the new copy waits for the one that started it to be gone before it takes
 /// the single-instance lock.
 pub fn wait_for_exit(pid: u32) {
     const SYNCHRONIZE: u32 = 0x0010_0000;
@@ -353,10 +359,15 @@ impl App {
     /// Lens blends follow the crosshair's shape; the scope zoom follows ADS.
     fn sync_lenses(&mut self, c: &Crosshair) {
         let effects: Vec<(Blend, [bool; N * N])> = if self.visible { c.lens_effects().into_iter().map(|e| (e, c.lens_mask(e))).collect() } else { Vec::new() };
-        let z = &self.cfg.exp.zoom;
-        let zoom = (z.enabled && self.visible && (z.when == ZoomWhen::Always || self.ads)).then(|| ZoomSpec { center: self.center(), size: z.size, factor: z.factor as f32 / 10.0, circle: z.circle });
+        // Two magnified areas, both centered on the crosshair (and so following Follow window, the monitor
+        // choice and the offset): Scope zoom, and Aspect ratio, which has a shape of its own.
+        let (z, p) = (&self.cfg.exp.zoom, &self.cfg.exp.aspect);
+        let on = |enabled: bool, when: ZoomWhen| enabled && self.visible && (when == ZoomWhen::Always || self.ads);
+        let center = self.center();
+        let zoom = on(z.enabled, z.when).then(|| AreaSpec { center, geo: area::zoom(z.size, z.factor as f32 / 10.0), ellipse: z.circle });
+        let aspect = on(p.enabled, p.when).then(|| AreaSpec { center, geo: area::aspect(p.size, p.ratio, p.fit, p.factor as f32 / 10.0), ellipse: p.ellipse });
         let exclude = [self.hwnd, self.trace.hwnd, self.hud.hwnd];
-        self.lenses.update(&lens::Spec { crosshair_pos: self.window_pos(), scale: self.scale, effects: &effects, zoom, exclude: &exclude, hide_from_capture: !self.cfg.exp.show_on_capture });
+        self.lenses.update(&lens::Spec { crosshair_pos: self.window_pos(), scale: self.scale, effects: &effects, areas: [zoom, aspect], exclude: &exclude, hide_from_capture: !self.cfg.exp.show_on_capture });
         if self.lenses.any() {
             self.reassert_topmost();
             self.wake();
@@ -796,7 +807,7 @@ impl App {
             self.check_now();
         }
         if fx.restart {
-            self.restart_now();
+            self.restart_and_update();
         }
         if fx.trace_demo {
             self.start_trace_demo();
@@ -937,9 +948,35 @@ impl App {
             Outcome::Failed(_) => Status::Failed,
         };
         self.set_update_status(status);
+        // The Restart button was waiting on this check: restart now, whatever it found (or failed to).
+        if std::mem::take(&mut self.live.restart_pending) {
+            unsafe { KillTimer(self.hwnd, TIMER_RESTART) };
+            self.restart_now();
+        }
     }
 
-    /// "Restart now": start the installed version, which waits for this one to be gone, and quit.
+    /// The menu's Restart button: restart, installing a newer version first if there is one. With
+    /// Auto-update on and nothing installed yet it checks first, and restarts when the check answers (or
+    /// after a few seconds if it does not); with Auto-update off, or an update already waiting, it just restarts.
+    fn restart_and_update(&mut self) {
+        if UPDATE_DONE.load(Ordering::SeqCst) || !self.cfg.autoupdate {
+            self.restart_now();
+            return;
+        }
+        self.live.restart_pending = true;
+        self.set_update_status(Status::Checking);
+        self.spawn_check();
+        unsafe { SetTimer(self.hwnd, TIMER_RESTART, RESTART_WAIT_MS, None) };
+    }
+
+    fn on_restart_timer(&mut self) {
+        unsafe { KillTimer(self.hwnd, TIMER_RESTART) };
+        if std::mem::take(&mut self.live.restart_pending) {
+            self.restart_now();
+        }
+    }
+
+    /// Start the installed version, which waits for this one to be gone, and quit.
     fn restart_now(&self) {
         let Ok(exe) = std::env::current_exe() else { return };
         if std::process::Command::new(exe).arg("--restart-from").arg(std::process::id().to_string()).spawn().is_ok() {
@@ -1011,6 +1048,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 TIMER_IDLE => with_app(|app| app.on_idle_tick()),
                 TIMER_FOLLOW => with_app(|app| app.on_follow_tick()),
                 TIMER_UPDATE => with_app(|app| app.on_update_timer()),
+                TIMER_RESTART => with_app(|app| app.on_restart_timer()),
                 _ => with_app(|app| app.on_topmost_timer()),
             }
             0
@@ -1147,14 +1185,32 @@ pub fn dump(base: &str) -> i32 {
         }
         hud.menu.activate(&mut cfg, Action::Header(Section::Experimental), 1);
         hud.dump_bmp(&cfg, &format!("{base}-experimental.bmp"));
-        for g in [Group::Blend, Group::Dynamics, Group::Trace, Group::Zoom, Group::Auto] {
+        for g in [Group::Blend, Group::Dynamics, Group::Trace, Group::Zoom, Group::Aspect, Group::Auto] {
             hud.menu.activate(&mut cfg, Action::Group(g), 1);
         }
         cfg.exp.dynamics.enabled = true;
         cfg.exp.trace.enabled = true;
         cfg.exp.zoom.enabled = true;
+        cfg.exp.aspect.enabled = true;
         cfg.exp.auto.enabled = true;
         hud.dump_bmp(&cfg, &format!("{base}-experimental-open.bmp"));
+
+        // Only the Aspect ratio group open, so it fits the picture.
+        hud.menu = crate::menu::Menu::new();
+        for s in [Section::Profile, Section::Layers, Section::Layer] {
+            hud.menu.activate(&mut cfg, Action::Header(s), 1);
+        }
+        hud.menu.activate(&mut cfg, Action::Header(Section::Experimental), 1);
+        hud.menu.activate(&mut cfg, Action::Group(Group::Aspect), 1);
+        hud.dump_bmp(&cfg, &format!("{base}-aspect.bmp"));
+        hud.menu = crate::menu::Menu::new();
+        for s in [Section::Profile, Section::Layers, Section::Layer] {
+            hud.menu.activate(&mut cfg, Action::Header(s), 1);
+        }
+        hud.menu.activate(&mut cfg, Action::Header(Section::Experimental), 1);
+        for g in [Group::Blend, Group::Dynamics, Group::Trace, Group::Zoom, Group::Aspect, Group::Auto] {
+            hud.menu.activate(&mut cfg, Action::Group(g), 1);
+        }
 
         // Display section, and the menu at 2x.
         hud.menu = crate::menu::Menu::new();
@@ -1288,6 +1344,7 @@ pub fn run(cfg_path: PathBuf, smoke: bool) -> i32 {
             states: Tracker::new(),
             morph: Morph::new(),
             demo: None,
+            restart_pending: false,
             hues: [0; 4],
             started: now,
         };

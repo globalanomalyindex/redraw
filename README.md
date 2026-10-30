@@ -30,8 +30,9 @@ can hide any overlay.
 | `F11` | reload `redraw.cfg` after editing it by hand |
 | `Ctrl+Alt+F9` | quit |
 
-In the menu: click, right-click a row to go back, arrows / Enter / Space / Esc, mouse wheel to scroll.
-The red **ForceQuit** button at the very bottom closes the program at once.
+These controls are also listed in white under the title in the menu. In the menu: click, right-click a row to go back,
+arrows / Enter / Space / Esc, mouse wheel to scroll. At the very bottom, **Restart** (orange) restarts the program,
+installing a newer version first if there is one, and **ForceQuit** (red) closes it at once.
 
 - **Layers:** up to 8 of Spokes, Ring, Diamond, Bracket, Dot, Chevron, Polygon (and stars), Arc, Ladder, Line, Disc,
   each with its own color (sliders, hex, or a color cycle), opacity, shift and mirror.
@@ -39,8 +40,10 @@ The red **ForceQuit** button at the very bottom closes the program at once.
   crossfaded (Morph).
 - **States:** bind crouch, sprint and jump keys to tighten, widen or recolor the crosshair while held.
 - **Share codes:** copy your whole crosshair as one line of text, paste someone else's.
-- **Experimental [!]:** Glow and lens blends (Invert, Contrast, Gray), scope zoom, input dynamics, spray trace,
-  auto contrast.
+- **Experimental [!]:** Glow and lens blends (Invert, Contrast, Gray), scope zoom, **Aspect ratio** (a magnified area
+  at the center that takes any shape from 1:1 to 21:9 or 9:16, and either stretches what it shows or crops it),
+  input dynamics, spray trace, auto contrast. All of it works from Windows' own magnifier and the screen behind the
+  crosshair; nothing touches the game.
 - **Display:** the crosshair sits in the middle of your primary screen (or another monitor, or the focused window),
   scaled by whole numbers to suit any resolution and refresh rate.
 
@@ -48,7 +51,7 @@ The red **ForceQuit** button at the very bottom closes the program at once.
 
 reDraw looks for a newer release of this repository when it starts and every 30 minutes, downloads it in the
 background, checks its size and SHA-256 checksum (and that it really is a 64-bit Windows program), and swaps it in.
-It runs the new version the next time you start it ("Restart now" in the menu does that at once). The previous
+It runs the new version the next time you start it (the **Restart** button in the menu does that at once). The previous
 version is kept beside it as `redraw.exe.old`. The line under the title says where it stands, and
 **Updates > Auto-update** turns it off.
 
@@ -75,6 +78,10 @@ cargo build --release --manifest-path installer\Cargo.toml
 local fake release server) and `examples/lagprobe.rs` measures what each blend costs the desktop compositor. Both
 are test tools: they move the mouse and draw on screen, so run them on a machine you are not using.
 Build them with `--features "multi-instance local-update"` to run next to an installed copy.
+
+## License
+
+[MIT](LICENSE) (c) 2026 christopher robin fiore.
 
 ## Remove
 

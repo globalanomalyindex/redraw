@@ -10,7 +10,7 @@ use crate::color;
 use crate::config::{key_name, Config, Profile, Trigger, TRIGGER_KEYS};
 use crate::crosshair::{presets, Blend, Crosshair, Kind, Layer, Mirror, MAX_LAYERS, PALETTE};
 use crate::display::{Info, MonitorSel, FPS_CAPS};
-use crate::experimental::{AutoMode, Motion, TraceActive, TraceReturn, TraceStyle, ZoomWhen, TRACE_RANGES};
+use crate::experimental::{ratio_name, AutoMode, Fit, Motion, TraceActive, TraceReturn, TraceStyle, ZoomWhen, RATIOS, TRACE_RANGES};
 use crate::morph;
 use crate::share;
 use crate::states::{self, State};
@@ -30,6 +30,9 @@ pub const TITLE_H: i32 = 14;
 pub const CREDIT_H: i32 = 11;
 /// The line between the title and the credit: the update status, in the small type.
 pub const UPDATE_H: i32 = 11;
+/// The controls listed under the credit: this many lines of this height (the small type).
+pub const HELP_H: i32 = 11;
+pub const HELP_LINES: i32 = 2;
 pub const SECTION_GAP: i32 = 4;
 pub const LINK_GAP: i32 = 8;
 pub const SLIDER_GAP: i32 = 4;
@@ -109,6 +112,7 @@ pub enum Group {
     Jump = 7,
     Sprint = 8,
     Crouch = 9,
+    Aspect = 10,
 }
 
 impl Group {
@@ -192,6 +196,13 @@ pub enum Exp {
     ZoomSize,
     ZoomShape,
     ZoomWhen,
+    AspectEnable,
+    AspectRatio,
+    AspectFit,
+    AspectZoom,
+    AspectSize,
+    AspectShape,
+    AspectWhen,
     AutoEnable,
     AutoMode,
     AutoRate,
@@ -199,7 +210,7 @@ pub enum Exp {
 
 impl Exp {
     pub fn is_slider(self) -> bool {
-        matches!(self, Exp::TraceWidth | Exp::TraceScale | Exp::TraceFade | Exp::ZoomFactor | Exp::ZoomSize)
+        matches!(self, Exp::TraceWidth | Exp::TraceScale | Exp::TraceFade | Exp::ZoomFactor | Exp::ZoomSize | Exp::AspectZoom | Exp::AspectSize)
     }
 }
 
@@ -237,8 +248,17 @@ pub enum Action {
     PasteCode,
     AutoUpdate,
     CheckNow,
-    RestartNow,
+    Restart,
     ForceQuit,
+}
+
+/// What a button row is for, which sets its color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    /// Claude orange: restarts the program
+    Restart,
+    /// red: closes it
+    Danger,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -254,8 +274,8 @@ pub enum ItemKind {
     Check { label: &'static str, on: bool },
     /// A collapsible sub-group header inside the Experimental section
     GroupHead { title: String, open: bool },
-    /// The red ForceQuit button
-    Danger { text: String },
+    /// A button: a row like a section header, flush left, with no arrow
+    Button { text: String, tone: Tone },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -375,7 +395,7 @@ pub struct Menu {
     open: [bool; 10],
     /// what the updater is doing, shown under the title
     update: Status,
-    groups: [bool; 10],
+    groups: [bool; 11],
     /// the hue/saturation/value the color sliders last set, so a gray or black color keeps its hue
     hsv_mem: Option<(u32, (f32, f32, f32))>,
     /// what the Auto choices resolved to on this machine, shown beside "Auto"
@@ -604,7 +624,7 @@ impl Menu {
         Menu {
             open: [true, true, true, false, false, false, false, false, false, false],
             update: Status::Checking,
-            groups: [false; 10],
+            groups: [false; 11],
             hsv_mem: None,
             info: Info::default(),
             editing: Profile::Hip,
@@ -696,7 +716,7 @@ impl Menu {
         let layer = &ch.layers[sel];
         let small = self.metrics.small_cell.max(1);
         let cell = self.metrics.body_cell;
-        let mut b = Builder { items: Vec::new(), bodies: Vec::new(), y: BORDER + PAD_TOP + TITLE_H + UPDATE_H + CREDIT_H, body_start: 0, group_start: 0, indent: 0 };
+        let mut b = Builder { items: Vec::new(), bodies: Vec::new(), y: BORDER + PAD_TOP + TITLE_H + UPDATE_H + CREDIT_H + HELP_LINES * HELP_H, body_start: 0, group_start: 0, indent: 0 };
         let open = |s: Section| self.open[s as usize];
 
         let profile_name = if p == Profile::Hip { "Hip fire" } else { "ADS" };
@@ -829,11 +849,7 @@ impl Menu {
         if open(Section::Updates) {
             b.row(Some(Action::AutoUpdate), ItemKind::Cycle { label: "Auto-update:", value: if cfg.autoupdate { "On" } else { "Off" }.to_string(), swatch: None }, ROW_H);
             b.row(None, ItemKind::Cycle { label: "Version:", value: update::VERSION.to_string(), swatch: None }, ROW_H);
-            let mut links = vec![("Check now", Action::CheckNow)];
-            if matches!(self.update, Status::Installed(_)) {
-                links.push(("Restart now", Action::RestartNow));
-            }
-            b.links(&links, cell);
+            b.links(&[("Check now", Action::CheckNow)], cell);
             b.end_body();
         }
 
@@ -848,7 +864,7 @@ impl Menu {
         b.header(Section::Experimental, "Experimental [!]".to_string(), open(Section::Experimental));
         if open(Section::Experimental) {
             let e = &cfg.exp;
-            let (d, t, z, a) = (&e.dynamics, &e.trace, &e.zoom, &e.auto);
+            let (d, t, z, p, a) = (&e.dynamics, &e.trace, &e.zoom, &e.aspect, &e.auto);
             let grp = |g: Group| self.groups[g as usize];
             check(&mut b, Exp::CaptureShow, "Show on screen capture", e.show_on_capture);
 
@@ -901,6 +917,20 @@ impl Menu {
                 b.end_group();
             }
 
+            b.group_head(Group::Aspect, "Aspect ratio".to_string(), grp(Group::Aspect));
+            if grp(Group::Aspect) {
+                check(&mut b, Exp::AspectEnable, "Enabled", p.enabled);
+                if p.enabled {
+                    pick_row(&mut b, Exp::AspectRatio, "Ratio:", &ratio_name(p.ratio), None);
+                    pick_row(&mut b, Exp::AspectFit, "Fit:", if p.fit == Fit::Stretch { "Stretch" } else { "Crop" }, None);
+                    slide(&mut b, Exp::AspectZoom, "Zoom", (10, 40, 5), p.factor, format!("{:.1}x", p.factor as f32 / 10.0));
+                    slide(&mut b, Exp::AspectSize, "Size", (100, 400, 20), p.size, p.size.to_string());
+                    pick_row(&mut b, Exp::AspectShape, "Shape:", if p.ellipse { "Ellipse" } else { "Rectangle" }, None);
+                    pick_row(&mut b, Exp::AspectWhen, "Active:", if p.when == ZoomWhen::Ads { "ADS" } else { "Always" }, None);
+                }
+                b.end_group();
+            }
+
             b.group_head(Group::Auto, "Auto contrast".to_string(), grp(Group::Auto));
             if grp(Group::Auto) {
                 check(&mut b, Exp::AutoEnable, "Enabled", a.enabled);
@@ -913,11 +943,14 @@ impl Menu {
             b.end_body();
         }
 
-        // The last row of the menu: closes the program, whatever else is going on. It is laid out like a
-        // section header (same row, same hover), just without the arrow.
+        // The last two rows of the menu. Restart restarts the program (installing a newer version first, if
+        // there is one); ForceQuit closes it, whatever else is going on. Both are laid out like a section
+        // header (same row, same hover), just without the arrow.
         b.y += SECTION_GAP;
-        b.items.push(Item { action: Some(Action::ForceQuit), kind: ItemKind::Danger { text: "ForceQuit".to_string() }, rect: Rect { x: CONTENT_X, y: b.y, w: CONTENT_W, h: ROW_H } });
-        b.y += ROW_H;
+        for (action, text, tone) in [(Action::Restart, "Restart", Tone::Restart), (Action::ForceQuit, "ForceQuit", Tone::Danger)] {
+            b.items.push(Item { action: Some(action), kind: ItemKind::Button { text: text.to_string(), tone }, rect: Rect { x: CONTENT_X, y: b.y, w: CONTENT_W, h: ROW_H } });
+            b.y += ROW_H;
+        }
 
         let height = b.y + PAD_BOTTOM + BORDER;
         Layout { items: b.items, bodies: b.bodies, height }
@@ -997,6 +1030,8 @@ impl Menu {
                     Exp::TraceFade => e.trace.fade = value.clamp(3, 30),
                     Exp::ZoomFactor => e.zoom.factor = (value.clamp(15, 40) + 2) / 5 * 5,
                     Exp::ZoomSize => e.zoom.size = (value.clamp(100, 400) + 10) / 20 * 20,
+                    Exp::AspectZoom => e.aspect.factor = (value.clamp(10, 40) + 2) / 5 * 5,
+                    Exp::AspectSize => e.aspect.size = (value.clamp(100, 400) + 10) / 20 * 20,
                     _ => {}
                 }
                 *e != before
@@ -1076,10 +1111,15 @@ impl Menu {
             Exp::ZoomEnable => e.zoom.enabled = !e.zoom.enabled,
             Exp::ZoomShape => e.zoom.circle = !e.zoom.circle,
             Exp::ZoomWhen => e.zoom.when = cycle(&[ZoomWhen::Ads, ZoomWhen::Always], e.zoom.when, dir),
+            Exp::AspectEnable => e.aspect.enabled = !e.aspect.enabled,
+            Exp::AspectRatio => e.aspect.ratio = cycle(&RATIOS, e.aspect.ratio, dir),
+            Exp::AspectFit => e.aspect.fit = cycle(&[Fit::Stretch, Fit::Crop], e.aspect.fit, dir),
+            Exp::AspectShape => e.aspect.ellipse = !e.aspect.ellipse,
+            Exp::AspectWhen => e.aspect.when = cycle(&[ZoomWhen::Ads, ZoomWhen::Always], e.aspect.when, dir),
             Exp::AutoEnable => e.auto.enabled = !e.auto.enabled,
             Exp::AutoMode => e.auto.mode = cycle(&[AutoMode::LightDark, AutoMode::Palette], e.auto.mode, dir),
             Exp::AutoRate => e.auto.rate = cycle(&[1u8, 2, 3], e.auto.rate, dir),
-            Exp::Blend | Exp::TraceWidth | Exp::TraceScale | Exp::TraceFade | Exp::ZoomFactor | Exp::ZoomSize => {
+            Exp::Blend | Exp::TraceWidth | Exp::TraceScale | Exp::TraceFade | Exp::ZoomFactor | Exp::ZoomSize | Exp::AspectZoom | Exp::AspectSize => {
                 fx.experimental = false;
                 fx.persist = false;
             }
@@ -1262,7 +1302,7 @@ impl Menu {
                 fx.persist = true;
             }
             Action::CheckNow => fx.update_check = true,
-            Action::RestartNow => fx.restart = true,
+            Action::Restart => fx.restart = true,
             Action::ForceQuit => fx.quit = true,
             Action::Group(g) => self.groups[g as usize] = !self.groups[g as usize],
             Action::Exp(id) => fx = fx.merge(self.exp_action(cfg, id, dir)),
@@ -1422,7 +1462,7 @@ impl Menu {
                             }
                         }
                     }
-                    (ItemKind::Pick { .. } | ItemKind::Link { .. } | ItemKind::Header { .. } | ItemKind::GroupHead { .. } | ItemKind::Export { .. } | ItemKind::Danger { .. }, Key::Enter | Key::Space) => {
+                    (ItemKind::Pick { .. } | ItemKind::Link { .. } | ItemKind::Header { .. } | ItemKind::GroupHead { .. } | ItemKind::Export { .. } | ItemKind::Button { .. }, Key::Enter | Key::Space) => {
                         fx = fx.merge(self.activate(cfg, action, 1))
                     }
                     _ => {}
@@ -1464,7 +1504,7 @@ mod tests {
             vec![("Profile · Hip fire".into(), true), ("Layers".into(), true), ("Layer 01".into(), true), ("Presets".into(), false), ("States".into(), false), ("Output".into(), false), ("Display".into(), false), ("Updates".into(), false), ("Preview 5x".into(), false), ("Experimental [!]".into(), false)]
         );
         let first = &l.items[0];
-        assert_eq!(first.rect, Rect { x: CONTENT_X, y: BORDER + PAD_TOP + TITLE_H + UPDATE_H + CREDIT_H + SECTION_GAP, w: CONTENT_W, h: ROW_H });
+        assert_eq!(first.rect, Rect { x: CONTENT_X, y: BORDER + PAD_TOP + TITLE_H + UPDATE_H + CREDIT_H + HELP_LINES * HELP_H + SECTION_GAP, w: CONTENT_W, h: ROW_H });
         let editing = find(&l, Action::Editing);
         assert_eq!((editing.rect.x, editing.rect.w), (ROW_X, ROW_W));
         assert_eq!(l.bodies.len(), 3);
@@ -1767,13 +1807,14 @@ mod tests {
     /// Everything in Experimental open and every feature switched on, so all rows exist.
     fn open_everything(m: &mut Menu, cfg: &mut Config) {
         m.open = [true; 10];
-        m.groups = [true; 10];
+        m.groups = [true; 11];
         for st in states::ALL {
             cfg.states.rule_mut(st).key = 0x43;
         }
         cfg.exp.dynamics.enabled = true;
         cfg.exp.trace.enabled = true;
         cfg.exp.zoom.enabled = true;
+        cfg.exp.aspect.enabled = true;
         cfg.exp.auto.enabled = true;
     }
 
@@ -1786,8 +1827,8 @@ mod tests {
         let l = m.layout(&cfg);
         let capture = find(&l, Action::Exp(Exp::CaptureShow));
         assert!(matches!(capture.kind, ItemKind::Check { on: true, label: "Show on screen capture" }));
-        assert_eq!(l.height - h0, 6 * ROW_H, "capture check plus five collapsed group headers");
-        for g in [Group::Blend, Group::Dynamics, Group::Trace, Group::Zoom, Group::Auto] {
+        assert_eq!(l.height - h0, 7 * ROW_H, "capture check plus six collapsed group headers");
+        for g in [Group::Blend, Group::Dynamics, Group::Trace, Group::Zoom, Group::Aspect, Group::Auto] {
             assert!(matches!(find(&l, Action::Group(g)).kind, ItemKind::GroupHead { open: false, .. }));
         }
     }
@@ -1839,7 +1880,7 @@ mod tests {
     }
 
     #[test]
-    fn the_updates_section_toggles_checks_and_offers_a_restart_only_when_one_is_ready() {
+    fn the_updates_section_toggles_and_checks() {
         let (mut m, mut cfg) = setup();
         click(&mut m, &mut cfg, Action::Header(Section::Updates), false);
         let l = m.layout(&cfg);
@@ -1848,7 +1889,7 @@ mod tests {
         assert!(version.action.is_none(), "the version is information, not a control");
         assert!(matches!(&version.kind, ItemKind::Cycle { value, .. } if value == update::VERSION));
         find(&l, Action::CheckNow);
-        assert!(!l.items.iter().any(|i| i.action == Some(Action::RestartNow)), "nothing to restart into yet");
+        assert_eq!(l.items.iter().filter(|i| i.action == Some(Action::Restart)).count(), 1, "one Restart, the button at the bottom: not a second one in this section");
 
         let fx = click(&mut m, &mut cfg, Action::AutoUpdate, false);
         assert!(!cfg.autoupdate && fx.update_cfg && fx.persist && !fx.crosshair);
@@ -1861,10 +1902,34 @@ mod tests {
 
         assert!(m.set_update(Status::Installed("0.2.9".to_string())), "a new status asks for a redraw");
         assert!(!m.set_update(Status::Installed("0.2.9".to_string())), "the same one does not");
-        let fx = click(&mut m, &mut cfg, Action::RestartNow, false);
-        assert!(fx.restart && !fx.quit);
-        m.set_update(Status::UpToDate);
-        assert!(!m.layout(&cfg).items.iter().any(|i| i.action == Some(Action::RestartNow)), "the link goes away again");
+        assert!(!m.layout(&cfg).items.iter().any(|i| matches!(i.kind, ItemKind::Link { ref text } if text == "Restart now")), "an installed update does not add a link: the Restart button covers it");
+    }
+
+    #[test]
+    fn restart_sits_just_above_force_quit_in_claude_orange_and_asks_the_overlay_to_restart() {
+        let (mut m, mut cfg) = setup();
+        for s in [Section::Presets, Section::States, Section::Output, Section::Display, Section::Updates, Section::Preview, Section::Experimental] {
+            m.activate(&mut cfg, Action::Header(s), 1);
+        }
+        let l = m.layout(&cfg);
+        let n = l.items.len();
+        let (restart, quit) = (&l.items[n - 2], &l.items[n - 1]);
+        assert_eq!((restart.action, quit.action), (Some(Action::Restart), Some(Action::ForceQuit)), "Restart is directly above ForceQuit");
+        assert!(matches!(&restart.kind, ItemKind::Button { text, tone: Tone::Restart } if text == "Restart"));
+        assert!(matches!(&quit.kind, ItemKind::Button { text, tone: Tone::Danger } if text == "ForceQuit"));
+        assert_eq!((restart.rect.x, restart.rect.w, restart.rect.h), (quit.rect.x, quit.rect.w, quit.rect.h), "the same row shape");
+        assert_eq!(quit.rect.y - restart.rect.y, ROW_H, "right above, no gap");
+        let fx = click(&mut m, &mut cfg, Action::Restart, false);
+        assert!(fx.restart && !fx.quit && !fx.persist && !fx.crosshair, "Restart only asks to restart");
+        assert!(!click(&mut m, &mut cfg, Action::Restart, true).restart, "a right click does not");
+        m.focus = Some(Action::Restart);
+        assert!(m.key(&mut cfg, Key::Enter).restart, "Enter on the focused button restarts");
+        m.focus = Some(Action::Restart);
+        assert!(!m.key(&mut cfg, Key::Right).restart && !m.key(&mut cfg, Key::Esc).restart, "arrows and Esc do not");
+        for status in [Status::Checking, Status::UpToDate, Status::Installed("0.2.9".to_string()), Status::Failed, Status::Off] {
+            m.set_update(status);
+            assert!(m.layout(&cfg).items.iter().any(|i| i.action == Some(Action::Restart)), "always available, whatever the update status");
+        }
     }
 
     #[test]
@@ -1876,7 +1941,7 @@ mod tests {
         let l = m.layout(&cfg);
         let last = l.items.last().expect("rows");
         assert_eq!(last.action, Some(Action::ForceQuit), "the last row, with everything open");
-        assert!(matches!(&last.kind, ItemKind::Danger { text } if text == "ForceQuit"));
+        assert!(matches!(&last.kind, ItemKind::Button { text, .. } if text == "ForceQuit"));
         assert!(l.items.iter().all(|i| i.rect.y <= last.rect.y), "nothing sits below it");
         assert!(last.rect.y + last.rect.h + PAD_BOTTOM + BORDER == l.height, "and it ends the window");
         assert!(!click(&mut m, &mut cfg, Action::Header(Section::Presets), false).quit, "other rows never quit");
@@ -1889,6 +1954,76 @@ mod tests {
         m.focus = Some(Action::ForceQuit);
         assert!(!m.key(&mut cfg, Key::Left).quit, "arrows only move");
         assert!(!m.key(&mut cfg, Key::Esc).quit, "Esc just closes the menu");
+    }
+
+    #[test]
+    fn aspect_ratio_is_an_experimental_group_with_its_options_behind_the_checkbox() {
+        let (mut m, mut cfg) = setup();
+        click(&mut m, &mut cfg, Action::Header(Section::Experimental), false);
+        let head = find(&m.layout(&cfg), Action::Group(Group::Aspect));
+        assert!(matches!(&head.kind, ItemKind::GroupHead { title, open: false } if title == "Aspect ratio"));
+        click(&mut m, &mut cfg, Action::Group(Group::Aspect), false);
+        let l = m.layout(&cfg);
+        find(&l, Action::Exp(Exp::AspectEnable));
+        assert!(!l.items.iter().any(|i| i.action == Some(Action::Exp(Exp::AspectRatio))), "options hidden until enabled");
+        let fx = click(&mut m, &mut cfg, Action::Exp(Exp::AspectEnable), false);
+        assert!(cfg.exp.aspect.enabled && fx.experimental && fx.persist && !fx.crosshair);
+        let l = m.layout(&cfg);
+        for e in [Exp::AspectRatio, Exp::AspectFit, Exp::AspectZoom, Exp::AspectSize, Exp::AspectShape, Exp::AspectWhen] {
+            find(&l, Action::Exp(e));
+        }
+        assert!(matches!(&find(&l, Action::Exp(Exp::AspectRatio)).kind, ItemKind::Cycle { label: "Ratio:", value, .. } if value == "16:9"));
+        assert!(matches!(&find(&l, Action::Exp(Exp::AspectFit)).kind, ItemKind::Cycle { value, .. } if value == "Stretch"));
+        assert!(matches!(&find(&l, Action::Exp(Exp::AspectShape)).kind, ItemKind::Cycle { value, .. } if value == "Rectangle"));
+    }
+
+    #[test]
+    fn the_ratio_row_walks_every_offered_ratio_and_back() {
+        let (mut m, mut cfg) = setup();
+        cfg.exp.aspect.enabled = true;
+        let start = cfg.exp.aspect.ratio;
+        let mut seen = vec![start];
+        for _ in 0..RATIOS.len() {
+            m.activate(&mut cfg, Action::Exp(Exp::AspectRatio), 1);
+            seen.push(cfg.exp.aspect.ratio);
+        }
+        assert_eq!(cfg.exp.aspect.ratio, start, "a full lap comes back");
+        seen.pop();
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), RATIOS.len(), "every ratio is visited once: {seen:?}");
+        m.activate(&mut cfg, Action::Exp(Exp::AspectRatio), -1);
+        assert_ne!(cfg.exp.aspect.ratio, start, "right click steps back");
+        for (e, before) in [(Exp::AspectFit, cfg.exp.aspect.fit as u8), (Exp::AspectShape, cfg.exp.aspect.ellipse as u8), (Exp::AspectWhen, cfg.exp.aspect.when as u8)] {
+            let c0 = cfg.exp.clone();
+            m.activate(&mut cfg, Action::Exp(e), 1);
+            assert_ne!(cfg.exp, c0, "{e:?} changes something ({before})");
+        }
+    }
+
+    #[test]
+    fn the_aspect_sliders_reach_one_times_and_snap_to_their_steps() {
+        let (mut m, mut cfg) = setup();
+        open_everything(&mut m, &mut cfg);
+        let row = find(&m.layout(&cfg), Action::Exp(Exp::AspectZoom));
+        assert!(matches!(row.kind, ItemKind::Slider { min: 10, max: 40, step: 5, .. }), "from 1.0x (a pure shape change) to 4.0x: {:?}", row.kind);
+        m.focus = Some(Action::Exp(Exp::AspectZoom));
+        let fx = m.key(&mut cfg, Key::Left);
+        assert_eq!(cfg.exp.aspect.factor, 15, "2.0x steps down by 0.5x");
+        assert!(fx.experimental && fx.persist && !fx.crosshair);
+        for _ in 0..10 {
+            m.key(&mut cfg, Key::Left);
+        }
+        assert_eq!(cfg.exp.aspect.factor, 10, "stops at 1.0x");
+        m.focus = Some(Action::Exp(Exp::AspectSize));
+        m.key(&mut cfg, Key::Right);
+        assert_eq!(cfg.exp.aspect.size, 280, "size steps by 20");
+        let row = find(&m.layout(&cfg), Action::Exp(Exp::AspectZoom));
+        let fx = m.mouse_down(&mut cfg, row.hit_rect().x + SLIDER_W - 2, row.hit_rect().y + 3, false);
+        assert_eq!(cfg.exp.aspect.factor, 40);
+        assert!(fx.experimental && !fx.crosshair, "dragging reports experimental, like the other lens sliders");
+        assert_eq!(Config::parse(&cfg.serialize()), cfg, "and it is saved");
     }
 
     #[test]

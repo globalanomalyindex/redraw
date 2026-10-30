@@ -67,6 +67,8 @@ const PREVIEW_DARK: u32 = 0x101216;
 const GRADIENT: [u32; 7] = [0xFF5F5F, 0xFFB627, 0xFFE94D, 0x6BFF8A, 0x4AA8FF, 0xB388FF, 0xFF5F5F];
 pub const TITLE: &str = "reDraw";
 pub const CREDIT: &str = "by christopher robin fiore";
+/// The program's controls, in the small type under the credit (HELP_LINES lines).
+pub const CONTROLS: [&str; 2] = ["Open/close F10  Show/hide F9", "Reload F11  Quit Ctrl+Alt+F9"];
 pub const TITLE_PERIOD_SECS: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -322,6 +324,9 @@ fn paint_chrome(c: &mut Canvas, layout: &Layout, menu: &Menu, text: &dyn TextBac
     let (status, status_color) = status_line(menu.update_status());
     text.draw(c, CONTENT_X, BORDER + PAD_TOP + TITLE_H + sy, UPDATE_H, &status, status_color, Font::Small);
     text.draw(c, CONTENT_X, BORDER + PAD_TOP + TITLE_H + UPDATE_H + sy, CREDIT_H, CREDIT, COLOR_LABEL, Font::Small);
+    for (i, line) in CONTROLS.iter().enumerate() {
+        text.draw(c, CONTENT_X, BORDER + PAD_TOP + TITLE_H + UPDATE_H + CREDIT_H + i as i32 * HELP_H + sy, HELP_H, line, COLOR_ACTIVE, Font::Small);
+    }
 
     for &(x, y0, y1) in &layout.bodies {
         c.fill(Rect { x, y: y0 + sy, w: 1, h: y1 - y0 }, COLOR_HAIRLINE, 255);
@@ -427,9 +432,13 @@ fn draw_item(c: &mut Canvas, item: &Item, sy: i32, hover: Option<Action>, focus:
                 }
             }
             ItemKind::Preview => paint_preview(c, r, cfg.profile(menu.editing)),
-            ItemKind::Danger { text: t } => {
+            ItemKind::Button { text: t, tone } => {
                 // Like a section header without the arrow: flush left, and the same hover tint as every row.
-                text.draw(c, r.x, r.y, ROW_H, t, COLOR_DANGER, Font::Body);
+                let color = match tone {
+                    Tone::Restart => COLOR_DEV,
+                    Tone::Danger => COLOR_DANGER,
+                };
+                text.draw(c, r.x, r.y, ROW_H, t, color, Font::Body);
             }
         }
         if focused {
@@ -618,6 +627,43 @@ mod tests {
     }
 
     #[test]
+    fn the_controls_are_listed_in_white_small_type_under_the_credit() {
+        let (mut m, cfg) = (Menu::new(), Config::default());
+        let (px, w, _) = render(&mut m, &cfg, 0.0);
+        let count = |y0: i32, y1: i32, ink: u32| (y0..y1).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|(x, y)| px[(*y * w + *x) as usize] == 0xFF00_0000 | ink).count();
+        let credit_top = BORDER + PAD_TOP + TITLE_H + UPDATE_H;
+        let help_top = credit_top + CREDIT_H;
+        assert_eq!(CONTROLS.len() as i32, HELP_LINES, "the menu reserves exactly the lines there are");
+        assert!(count(help_top, help_top + HELP_H, COLOR_ACTIVE) > 40, "line one is white");
+        assert!(count(help_top + HELP_H, help_top + 2 * HELP_H, COLOR_ACTIVE) > 40, "line two is white");
+        assert_eq!(count(credit_top, help_top, COLOR_ACTIVE), 0, "the credit above stays gray");
+        assert!(count(credit_top, help_top, COLOR_LABEL) > 20);
+        for line in CONTROLS {
+            assert!(line.chars().count() as i32 * 5 <= CONTENT_W, "{line:?} fits the small type across the menu");
+        }
+        // every key the program really has is listed, in the words people use
+        let all = CONTROLS.join(" ");
+        for want in ["Open/close F10", "Show/hide F9", "Reload F11", "Quit Ctrl+Alt+F9"] {
+            assert!(all.contains(want), "{want}");
+        }
+        let first_row = BORDER + PAD_TOP + TITLE_H + UPDATE_H + CREDIT_H + HELP_LINES * HELP_H;
+        assert_eq!(Menu::new().layout(&cfg).items[0].rect.y, first_row + SECTION_GAP, "and the menu starts below them");
+    }
+
+    #[test]
+    fn restart_is_claude_orange_and_force_quit_red() {
+        let (mut m, cfg) = (Menu::new(), Config::default());
+        let (px, w, layout) = render_full(&mut m, &cfg);
+        let n = layout.items.len();
+        let ink = |r: Rect, color: u32| (r.y..r.y + r.h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|(x, y)| px[(*y * w + *x) as usize] == 0xFF00_0000 | color).count();
+        let (restart, quit) = (layout.items[n - 2].rect, layout.items[n - 1].rect);
+        assert!(ink(restart, COLOR_DEV) > 20 && ink(restart, COLOR_DANGER) == 0, "Restart is the orange of the [Dev] tag");
+        assert!(ink(quit, COLOR_DANGER) > 20 && ink(quit, COLOR_DEV) == 0, "ForceQuit is red");
+        let min_x = |r: Rect, color: u32| (r.y..r.y + r.h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|(x, y)| px[(*y * w + *x) as usize] == 0xFF00_0000 | color).map(|p| p.0).min().unwrap();
+        assert_eq!(min_x(restart, COLOR_DEV), restart.x, "flush left, like ForceQuit and where a header's arrow starts");
+    }
+
+    #[test]
     fn a_status_change_repaints_the_title_area_and_matches_a_full_paint() {
         let (mut m, cfg) = (Menu::new(), Config::default());
         let t = Boxes { calls: Cell::new(0) };
@@ -638,7 +684,7 @@ mod tests {
         let (px, w, layout) = render_full(&mut m, &cfg);
         let item = layout.items.last().expect("rows");
         let r = item.rect;
-        assert!(matches!(item.kind, ItemKind::Danger { .. }));
+        assert!(matches!(item.kind, ItemKind::Button { .. }));
         let header = layout.items.iter().find(|i| i.action == Some(Action::Header(Section::Presets))).expect("a header").rect;
         assert_eq!((r.x, r.w, r.h), (header.x, header.w, header.h), "the same row as a dropdown header");
         let red = 0xFF00_0000 | COLOR_DANGER;

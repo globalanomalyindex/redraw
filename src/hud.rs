@@ -512,7 +512,7 @@ mod tests {
         for s in [Section::Presets, Section::States, Section::Output, Section::Display, Section::Preview, Section::Experimental] {
             hud.menu.activate(&mut cfg, Action::Header(s), 1);
         }
-        for g in [Group::Blend, Group::Dynamics, Group::Trace, Group::Zoom, Group::Auto, Group::Color, Group::Transform, Group::Jump, Group::Sprint, Group::Crouch] {
+        for g in [Group::Blend, Group::Dynamics, Group::Trace, Group::Zoom, Group::Aspect, Group::Auto, Group::Color, Group::Transform, Group::Jump, Group::Sprint, Group::Crouch] {
             hud.menu.activate(&mut cfg, Action::Group(g), 1);
         }
         for st in crate::states::ALL {
@@ -521,6 +521,7 @@ mod tests {
         cfg.exp.dynamics.enabled = true;
         cfg.exp.trace.enabled = true;
         cfg.exp.zoom.enabled = true;
+        cfg.exp.aspect.enabled = true;
         cfg.exp.auto.enabled = true;
         // Really on screen (but never stealing focus), so the compositor cost is included.
         hud.visible = true;

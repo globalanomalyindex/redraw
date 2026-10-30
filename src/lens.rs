@@ -16,6 +16,7 @@ use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::UI::Magnification::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+use crate::area::Geometry;
 use crate::crosshair::{Blend, N};
 
 const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
@@ -66,19 +67,23 @@ impl RateGate {
     }
 }
 
-pub struct ZoomSpec {
+/// A magnified area (Scope zoom, or Aspect ratio): centered on `center`, shaped and scaled by `geo`.
+pub struct AreaSpec {
     pub center: POINT,
-    pub size: i32,
-    pub factor: f32,
-    pub circle: bool,
+    pub geo: Geometry,
+    /// an ellipse inside its rectangle, instead of the whole rectangle
+    pub ellipse: bool,
 }
+
+/// How many magnified areas there can be at once: Scope zoom, and Aspect ratio.
+pub const AREAS: usize = 2;
 
 pub struct Spec<'a> {
     /// screen position of the crosshair's grid, and the whole-number scale it is drawn at
     pub crosshair_pos: POINT,
     pub scale: i32,
     pub effects: &'a [(Blend, [bool; N * N])],
-    pub zoom: Option<ZoomSpec>,
+    pub areas: [Option<AreaSpec>; AREAS],
     /// windows of ours that must not appear inside a magnified view
     pub exclude: &'a [HWND],
     pub hide_from_capture: bool,
@@ -87,12 +92,14 @@ pub struct Spec<'a> {
 struct LensWin {
     host: HWND,
     mag: HWND,
-    size: i32,
+    w: i32,
+    h: i32,
     pos: POINT,
     shape: Vec<bool>,
-    circle: bool,
+    ellipse: bool,
     src: RECT,
-    factor: f32,
+    /// the horizontal and vertical scale last set
+    scale: (f32, f32),
     effect: Option<Blend>,
 }
 
@@ -102,7 +109,7 @@ pub struct Lenses {
     inited: bool,
     failed: bool,
     cross: Vec<LensWin>,
-    zoom: Option<LensWin>,
+    areas: [Option<LensWin>; AREAS],
     filter_key: Vec<usize>,
     capture_hidden: Option<bool>,
     gate: RateGate,
@@ -124,19 +131,19 @@ fn matrix(effect: Blend) -> [f32; 25] {
 }
 
 impl LensWin {
-    unsafe fn create(hinstance: HINSTANCE, class: &[u16], size: i32) -> Option<LensWin> {
-        let host = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, class.as_ptr(), null(), WS_POPUP, 0, 0, size, size, null_mut(), null_mut(), hinstance, null());
+    unsafe fn create(hinstance: HINSTANCE, class: &[u16], w: i32, h: i32) -> Option<LensWin> {
+        let host = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, class.as_ptr(), null(), WS_POPUP, 0, 0, w, h, null_mut(), null_mut(), hinstance, null());
         if host.is_null() {
             return None;
         }
         SetLayeredWindowAttributes(host, 0, 255, LWA_ALPHA);
-        let mag = CreateWindowExW(0, WC_MAGNIFIERW, wide("MagnifierWindow").as_ptr(), WS_CHILD | WS_VISIBLE, 0, 0, size, size, host, null_mut(), hinstance, null());
+        let mag = CreateWindowExW(0, WC_MAGNIFIERW, wide("MagnifierWindow").as_ptr(), WS_CHILD | WS_VISIBLE, 0, 0, w, h, host, null_mut(), hinstance, null());
         if mag.is_null() {
             DestroyWindow(host);
             return None;
         }
         ShowWindow(host, SW_SHOWNOACTIVATE);
-        Some(LensWin { host, mag, size, pos: POINT { x: i32::MIN, y: 0 }, shape: Vec::new(), circle: false, src: RECT { left: 0, top: 0, right: size, bottom: size }, factor: 1.0, effect: None })
+        Some(LensWin { host, mag, w, h, pos: POINT { x: i32::MIN, y: 0 }, shape: Vec::new(), ellipse: false, src: RECT { left: 0, top: 0, right: w, bottom: h }, scale: (1.0, 1.0), effect: None })
     }
 
     unsafe fn place(&mut self, pos: POINT) {
@@ -146,11 +153,12 @@ impl LensWin {
         }
     }
 
-    unsafe fn set_transform(&mut self, factor: f32) {
-        if (self.factor - factor).abs() > 1e-4 || self.effect.is_none() {
-            let mut t = MAGTRANSFORM { v: [factor, 0.0, 0.0, 0.0, factor, 0.0, 0.0, 0.0, 1.0] };
+    /// Scale what the magnifier shows by `sx` across and `sy` down (they may differ: that is Stretch).
+    unsafe fn set_transform(&mut self, sx: f32, sy: f32) {
+        if (self.scale.0 - sx).abs() > 1e-4 || (self.scale.1 - sy).abs() > 1e-4 || self.effect.is_none() {
+            let mut t = MAGTRANSFORM { v: [sx, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 1.0] };
             MagSetWindowTransform(self.mag, &mut t);
-            self.factor = factor;
+            self.scale = (sx, sy);
         }
     }
 
@@ -199,12 +207,12 @@ impl Lenses {
             hIconSm: null_mut(),
         };
         unsafe { RegisterClassExW(&wc) };
-        Lenses { hinstance, class, inited: false, failed: false, cross: Vec::new(), zoom: None, filter_key: Vec::new(), capture_hidden: None, gate: RateGate::new(LENS_HZ) }
+        Lenses { hinstance, class, inited: false, failed: false, cross: Vec::new(), areas: [None, None], filter_key: Vec::new(), capture_hidden: None, gate: RateGate::new(LENS_HZ) }
     }
 
     /// True while a lens window exists and needs its source refreshed every frame.
     pub fn any(&self) -> bool {
-        !self.cross.is_empty() || self.zoom.is_some()
+        !self.cross.is_empty() || self.areas.iter().any(Option::is_some)
     }
 
     fn ensure_init(&mut self) -> bool {
@@ -220,8 +228,10 @@ impl Lenses {
             for l in self.cross.drain(..) {
                 l.destroy();
             }
-            if let Some(z) = self.zoom.take() {
-                z.destroy();
+            for slot in self.areas.iter_mut() {
+                if let Some(a) = slot.take() {
+                    a.destroy();
+                }
             }
         }
         self.filter_key.clear();
@@ -230,7 +240,7 @@ impl Lenses {
 
     /// Make the lens windows match `spec`: create, move, reshape or remove them.
     pub fn update(&mut self, spec: &Spec) {
-        if spec.effects.is_empty() && spec.zoom.is_none() {
+        if spec.effects.is_empty() && spec.areas.iter().all(Option::is_none) {
             if self.any() {
                 self.destroy_all();
             }
@@ -245,7 +255,7 @@ impl Lenses {
         unsafe {
             let before = self.cross.len();
             self.cross.retain(|l| {
-                let keep = l.size == size && spec.effects.iter().any(|(e, _)| Some(*e) == l.effect);
+                let keep = l.w == size && spec.effects.iter().any(|(e, _)| Some(*e) == l.effect);
                 if !keep {
                     l.destroy();
                 }
@@ -257,7 +267,7 @@ impl Lenses {
                 let idx = match self.cross.iter().position(|l| l.effect == Some(*effect)) {
                     Some(i) => i,
                     None => {
-                        let Some(mut w) = LensWin::create(self.hinstance, &self.class, size) else { continue };
+                        let Some(mut w) = LensWin::create(self.hinstance, &self.class, size, size) else { continue };
                         let mut fx = MAGCOLOREFFECT { transform: matrix(*effect) };
                         MagSetColorEffect(w.mag, &mut fx);
                         w.effect = Some(*effect);
@@ -275,36 +285,39 @@ impl Lenses {
                 }
             }
 
-            match &spec.zoom {
-                None => {
-                    if let Some(z) = self.zoom.take() {
-                        z.destroy();
-                        changed_set = true;
-                    }
-                }
-                Some(z) => {
-                    if self.zoom.as_ref().is_some_and(|w| w.size != z.size) {
-                        self.zoom.take().map(|w| w.destroy());
-                    }
-                    if self.zoom.is_none() {
-                        if let Some(w) = LensWin::create(self.hinstance, &self.class, z.size) {
-                            self.zoom = Some(w);
+            for (slot, want) in spec.areas.iter().enumerate() {
+                match want {
+                    None => {
+                        if let Some(w) = self.areas[slot].take() {
+                            w.destroy();
                             changed_set = true;
                         }
                     }
-                    if let Some(w) = self.zoom.as_mut() {
-                        w.place(POINT { x: z.center.x - z.size / 2, y: z.center.y - z.size / 2 });
-                        w.set_transform(z.factor);
-                        let sw = ((z.size as f32 / z.factor).round() as i32).max(8);
-                        w.src = RECT { left: z.center.x - sw / 2, top: z.center.y - sw / 2, right: z.center.x - sw / 2 + sw, bottom: z.center.y - sw / 2 + sw };
-                        if w.shape.is_empty() || w.circle != z.circle {
-                            if z.circle {
-                                SetWindowRgn(w.host, CreateEllipticRgn(0, 0, z.size + 1, z.size + 1), 1);
-                            } else {
-                                SetWindowRgn(w.host, null_mut(), 1);
+                    Some(a) => {
+                        let g = &a.geo;
+                        if self.areas[slot].as_ref().is_some_and(|w| w.w != g.w || w.h != g.h) {
+                            self.areas[slot].take().map(|w| w.destroy());
+                        }
+                        if self.areas[slot].is_none() {
+                            if let Some(w) = LensWin::create(self.hinstance, &self.class, g.w, g.h) {
+                                self.areas[slot] = Some(w);
+                                changed_set = true;
                             }
-                            w.circle = z.circle;
-                            w.shape = vec![true];
+                        }
+                        if let Some(w) = self.areas[slot].as_mut() {
+                            w.place(POINT { x: a.center.x - g.w / 2, y: a.center.y - g.h / 2 });
+                            w.set_transform(g.sx, g.sy);
+                            let (left, top) = (a.center.x - g.src_w / 2, a.center.y - g.src_h / 2);
+                            w.src = RECT { left, top, right: left + g.src_w, bottom: top + g.src_h };
+                            if w.shape.is_empty() || w.ellipse != a.ellipse {
+                                if a.ellipse {
+                                    SetWindowRgn(w.host, CreateEllipticRgn(0, 0, g.w + 1, g.h + 1), 1);
+                                } else {
+                                    SetWindowRgn(w.host, null_mut(), 1);
+                                }
+                                w.ellipse = a.ellipse;
+                                w.shape = vec![true];
+                            }
                         }
                     }
                 }
@@ -313,16 +326,16 @@ impl Lenses {
             // Every lens hides the overlay's own windows and every lens window from itself.
             let mut all: Vec<HWND> = spec.exclude.to_vec();
             all.extend(self.cross.iter().map(|l| l.host));
-            all.extend(self.zoom.iter().map(|l| l.host));
+            all.extend(self.areas.iter().flatten().map(|l| l.host));
             let key: Vec<usize> = all.iter().map(|h| *h as usize).collect();
             if changed_set || key != self.filter_key {
-                for w in self.cross.iter().chain(self.zoom.iter()) {
+                for w in self.cross.iter().chain(self.areas.iter().flatten()) {
                     MagSetWindowFilterList(w.mag, MW_FILTERMODE_EXCLUDE, all.len() as i32, all.as_mut_ptr());
                 }
                 self.filter_key = key;
             }
             if changed_set || self.capture_hidden != Some(spec.hide_from_capture) {
-                for w in self.cross.iter().chain(self.zoom.iter()) {
+                for w in self.cross.iter().chain(self.areas.iter().flatten()) {
                     SetWindowDisplayAffinity(w.host, if spec.hide_from_capture { WDA_EXCLUDEFROMCAPTURE } else { 0 });
                 }
                 self.capture_hidden = Some(spec.hide_from_capture);
@@ -343,7 +356,7 @@ impl Lenses {
     /// Re-read the screen into every lens, right now.
     fn refresh(&self) {
         unsafe {
-            for w in self.cross.iter().chain(self.zoom.iter()) {
+            for w in self.cross.iter().chain(self.areas.iter().flatten()) {
                 MagSetWindowSource(w.mag, w.src);
             }
         }

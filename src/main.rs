@@ -4,6 +4,7 @@
 //! It never reads game data. The only things it looks at are its own config
 //! file, its own hotkeys, and whether the right mouse button is down.
 
+mod area;
 mod autocolor;
 mod color;
 mod config;
