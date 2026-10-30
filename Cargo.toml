@@ -1,0 +1,41 @@
+[package]
+name = "redraw"
+version = "0.2.0"
+edition = "2021"
+authors = ["Christopher Robin Fiore"]
+description = "Tiny pixel-sharp crosshair overlay. Never reads game data."
+
+[dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input",
+    "Win32_UI_Magnification",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_SystemInformation"] }
+
+[features]
+# Test builds only (lag probe, e2e): lets a second copy run next to a real one, with no hotkeys.
+multi-instance = []
+# Test builds only: the updater talks plain http to a local server named by REDRAW_UPDATE_BASE.
+local-update = []
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
