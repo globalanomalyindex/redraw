@@ -676,7 +676,7 @@ trace.color=#ff00ff"));
                 let (rw, rh) = (212 * s, 700);
                 let shot = capture(rc.left, rc.top, rw, rh);
                 let reds: Vec<(i32, i32)> = (0..rw * rh).filter(|i| near(shot[*i as usize], (255, 77, 77), 12)).map(|i| (i % rw, i / rw)).collect();
-                check("forcequit: a red button sits at the bottom of the menu", reds.len() > 100, format!("{} red px", reds.len()));
+                check("forcequit: a red label sits at the bottom of the menu", reds.len() > 20, format!("{} red px", reds.len()));
                 let (x0, x1) = (reds.iter().map(|p| p.0).min().unwrap_or(0), reds.iter().map(|p| p.0).max().unwrap_or(0));
                 let (y0, y1) = (reds.iter().map(|p| p.1).min().unwrap_or(0), reds.iter().map(|p| p.1).max().unwrap_or(0));
                 println!("   forcequit button found at menu pixels ({x0},{y0})-({x1},{y1})");

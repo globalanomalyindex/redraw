@@ -428,12 +428,8 @@ fn draw_item(c: &mut Canvas, item: &Item, sy: i32, hover: Option<Action>, focus:
             }
             ItemKind::Preview => paint_preview(c, r, cfg.profile(menu.editing)),
             ItemKind::Danger { text: t } => {
-                if hovered {
-                    c.fill(r, COLOR_DANGER, 60);
-                }
-                c.outline(r, COLOR_DANGER);
-                let w = t.chars().count() as i32 * cell;
-                text.draw(c, r.x + (r.w - w) / 2, r.y + 1, r.h - 2, t, COLOR_DANGER, Font::Body);
+                // Like a section header without the arrow: flush left, and the same hover tint as every row.
+                text.draw(c, r.x, r.y, ROW_H, t, COLOR_DANGER, Font::Body);
             }
         }
         if focused {
@@ -637,17 +633,37 @@ mod tests {
     }
 
     #[test]
-    fn the_force_quit_button_is_drawn_red_with_a_red_outline() {
-        let (mut m, cfg) = (Menu::new(), Config::default());
+    fn the_force_quit_button_is_a_flush_left_red_label_in_a_header_row_with_the_normal_hover() {
+        let (mut m, mut cfg) = (Menu::new(), Config::default());
         let (px, w, layout) = render_full(&mut m, &cfg);
-        let r = layout.items.last().expect("rows").rect;
-        assert!(matches!(layout.items.last().unwrap().kind, ItemKind::Danger { .. }));
+        let item = layout.items.last().expect("rows");
+        let r = item.rect;
+        assert!(matches!(item.kind, ItemKind::Danger { .. }));
+        let header = layout.items.iter().find(|i| i.action == Some(Action::Header(Section::Presets))).expect("a header").rect;
+        assert_eq!((r.x, r.w, r.h), (header.x, header.w, header.h), "the same row as a dropdown header");
         let red = 0xFF00_0000 | COLOR_DANGER;
-        assert_eq!(px[(r.y * w + r.x + 20) as usize], red, "top edge");
-        assert_eq!(px[((r.y + r.h - 1) * w + r.x + 20) as usize], red, "bottom edge");
-        assert_eq!(px[((r.y + r.h / 2) * w + r.x) as usize], red, "left edge");
-        let ink = (r.y + 1..r.y + r.h - 1).flat_map(|y| (r.x + 1..r.x + r.w - 1).map(move |x| (x, y))).filter(|(x, y)| px[(*y * w + *x) as usize] == red).count();
-        assert!(ink > 20, "the label is red too ({ink} px)");
+        let reds: Vec<(i32, i32)> = (r.y..r.y + r.h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|(x, y)| px[(*y * w + *x) as usize] == red).collect();
+        assert!(reds.len() > 20, "the label is red ({} px)", reds.len());
+        let (min_x, max_x) = (reds.iter().map(|p| p.0).min().unwrap(), reds.iter().map(|p| p.0).max().unwrap());
+        assert_eq!(min_x, r.x, "flush left, where a header's arrow would start");
+        assert!(max_x < r.x + 9 * 6, "the label ends with its nine letters, not centered across the row (ends at {max_x})");
+        let probe = ((r.y + 1) * w + r.x + r.w - 5) as usize;
+        assert_ne!(px[((r.y + r.h / 2) * w + r.x + r.w - 1) as usize], red, "no outline");
+        // Hovering tints the whole row white, exactly as it does a dropdown header.
+        let before = px[probe];
+        m.mouse_move(&mut cfg, r.x + r.w - 5, r.y + 1, false);
+        assert_eq!(m.hover(), Some(Action::ForceQuit));
+        let (hovered, _, _) = render_full(&mut m, &cfg);
+        assert!(((hovered[probe] >> 16) & 0xFF) > ((before >> 16) & 0xFF), "the row brightens on hover: #{before:08x} -> #{:08x}", hovered[probe]);
+        let header_probe = ((header.y + 1) * w + header.x + header.w - 5) as usize;
+        let (header_before, header_hover) = {
+            let (mut m2, mut cfg2) = (Menu::new(), Config::default());
+            let (a, _, _) = render_full(&mut m2, &cfg2);
+            m2.mouse_move(&mut cfg2, header.x + header.w - 5, header.y + 1, false);
+            let (b, _, _) = render_full(&mut m2, &cfg2);
+            (a[header_probe], b[header_probe])
+        };
+        assert_eq!(hovered[probe].wrapping_sub(before), header_hover.wrapping_sub(header_before), "the very same tint");
     }
 
     #[test]

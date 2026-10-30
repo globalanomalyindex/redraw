@@ -913,9 +913,11 @@ impl Menu {
             b.end_body();
         }
 
-        // The last row of the menu: closes the program, whatever else is going on.
+        // The last row of the menu: closes the program, whatever else is going on. It is laid out like a
+        // section header (same row, same hover), just without the arrow.
         b.y += SECTION_GAP;
-        b.row(Some(Action::ForceQuit), ItemKind::Danger { text: "ForceQuit".to_string() }, ROW_H + 2);
+        b.items.push(Item { action: Some(Action::ForceQuit), kind: ItemKind::Danger { text: "ForceQuit".to_string() }, rect: Rect { x: CONTENT_X, y: b.y, w: CONTENT_W, h: ROW_H } });
+        b.y += ROW_H;
 
         let height = b.y + PAD_BOTTOM + BORDER;
         Layout { items: b.items, bodies: b.bodies, height }
